@@ -1,0 +1,75 @@
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+identifier = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+type_name = @{ identifier }
+literal = @{ number | string | boolean }
+number = @{ ASCII_DIGIT+ }
+string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+boolean = @{ "true" | "false" }
+
+contract = { SOI ~ contract_declaration ~ EOI }
+contract_declaration = { "contract" ~ identifier ~ "{" ~ contract_body ~ "}" }
+contract_body = { (state_variable_declaration | function_definition | event_definition)* }
+
+// Modifiers
+visibility_modifier = { "public" | "private" | "internal" | "external" }
+state_mutability_modifier = { "pure" | "view" | "payable" }
+constant_modifier = { "constant" }
+
+// State variables
+state_variable_declaration = { 
+    visibility_modifier? ~ constant_modifier? ~ type_name ~ identifier ~ ("=" ~ expression)? ~ ";" |
+    visibility_modifier? ~ constant_modifier? ~ mapping_declaration ~ identifier ~ ";"
+}
+
+mapping_declaration = { 
+    "mapping" ~ "(" ~ type_name ~ "=>" ~ type_name ~ ")"
+}
+
+function_definition = {
+    constructor_definition |
+    regular_function_definition
+}
+
+constructor_definition = {
+    "constructor" ~ "(" ~ parameter_list? ~ ")" ~ visibility_modifier? ~ function_body
+}
+
+regular_function_definition = {
+    "function" ~ identifier ~ 
+    "(" ~ parameter_list? ~ ")" ~
+    visibility_modifier? ~
+    state_mutability_modifier? ~
+    ("returns" ~ "(" ~ return_type ~ ")")? ~
+    function_body
+}
+
+parameter_list = { parameter ~ ("," ~ parameter)* }
+parameter = { type_name ~ identifier }
+return_type = { type_name }
+
+event_definition = { "event" ~ identifier ~ "(" ~ event_parameter_list? ~ ")" ~ ";" }
+event_parameter_list = { event_parameter ~ ("," ~ event_parameter)* }
+event_parameter = { type_name ~ indexed_modifier? ~ identifier }
+indexed_modifier = { "indexed" }
+
+function_body = { "{" ~ statement* ~ "}" }
+
+statement = {
+    assignment_statement |
+    return_statement |
+    emit_statement |
+    expression_statement
+}
+
+expression_statement = { expression ~ ";" }
+return_statement = { "return" ~ expression? ~ ";" }
+assignment_statement = { identifier ~ "=" ~ expression ~ ";" }
+emit_statement = { "emit" ~ identifier ~ "(" ~ argument_list? ~ ")" ~ ";" }
+
+argument_list = { expression ~ ("," ~ expression)* }
+expression = { term ~ (operator ~ term)* }
+term = _{ primary | "(" ~ expression ~ ")" }
+primary = { identifier | literal }
+operator = { "+" | "-" | "*" | "/" }

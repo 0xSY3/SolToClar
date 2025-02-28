@@ -1,0 +1,12 @@
+[package]
+name = "Sol2Clar"
+version = "0.1.0"
+edition = "2021"
+description = "A Solidity to Clarity transpiler"
+authors = ["Replit"]
+
+[dependencies]
+clap = "2.33"
+pest = "2.1"
+pest_derive = "2.1"
+anyhow = "1.0"
