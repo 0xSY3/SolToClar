@@ -14,7 +14,6 @@ pub struct ClarityContract {
 pub struct ClarityFunction {
     pub name: String,
     pub params: Vec<ClarityParameter>,
-    pub return_type: Option<String>,
     pub public: bool,
     pub read_only: bool,
     pub body: Vec<ClarityExpression>,
@@ -32,7 +31,7 @@ pub struct ClarityDataVar {
     pub var_type: String,
     pub initial_value: String,
     pub is_constant: bool,
-    pub visibility: String,
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug)]
@@ -52,6 +51,7 @@ pub struct ClarityEvent {
 pub struct ClarityEventField {
     pub name: String,
     pub field_type: String,
+    pub indexed: bool,
 }
 
 #[derive(Debug)]
@@ -61,7 +61,58 @@ pub enum ClarityExpression {
     FunctionCall(String, Vec<ClarityExpression>),
     MapGet(String, Vec<ClarityExpression>),
     MapSet(String, Vec<ClarityExpression>, Box<ClarityExpression>),
-    Print(Vec<ClarityExpression>),  // For event emission
+    Print(Vec<ClarityExpression>),
+}
+
+fn convert_nested_mapping_type(mapping: &MappingType) -> (String, String) {
+    if let Some(nested) = &mapping.nested {
+        let (nested_key_type, nested_value_type) = convert_nested_mapping_type(nested);
+        (
+            format!("{{owner: {}, token-id: {}}}", 
+                convert_solidity_type(&mapping.key_type),
+                nested_key_type
+            ),
+            nested_value_type
+        )
+    } else {
+        (
+            convert_solidity_type(&mapping.key_type),
+            convert_solidity_type(&mapping.value_type)
+        )
+    }
+}
+
+pub fn convert_solidity_type(solidity_type: &str) -> String {
+    match solidity_type {
+        "uint256" | "uint" => "uint".to_string(),
+        "bool" => "bool".to_string(),
+        "address" => "principal".to_string(),
+        "string" => "string-ascii".to_string(),
+        _ => {
+            if solidity_type.starts_with("mapping") {
+                solidity_type.to_string()
+            } else {
+                "uint".to_string()
+            }
+        }
+    }
+}
+
+fn convert_mapping(var: &StateVariable) -> Result<ClarityMap> {
+    if let Some(nested) = &var.nested_mapping {
+        let (key_type, value_type) = convert_nested_mapping_type(nested);
+        Ok(ClarityMap {
+            name: var.name.clone(),
+            key_type,
+            value_type,
+        })
+    } else {
+        Ok(ClarityMap {
+            name: var.name.clone(),
+            key_type: convert_solidity_type(&var.mapping_key_type.clone().unwrap()),
+            value_type: convert_solidity_type(&var.mapping_value_type.clone().unwrap()),
+        })
+    }
 }
 
 pub fn convert_contract(contract: Contract) -> Result<ClarityContract> {
@@ -73,26 +124,42 @@ pub fn convert_contract(contract: Contract) -> Result<ClarityContract> {
         events: Vec::new(),
     };
 
-    // Convert state variables
     for var in contract.state_variables {
         if var.is_mapping {
-            clarity_contract.maps.push(convert_mapping(var)?);
+            clarity_contract.maps.push(convert_mapping(&var)?);
         } else {
             clarity_contract.data_vars.push(convert_state_variable(var));
         }
     }
 
-    // Convert events
     for event in contract.events {
-        clarity_contract.events.push(convert_event(event));
+        clarity_contract.events.push(ClarityEvent {
+            name: event.name,
+            fields: event.params.into_iter()
+                .map(|p| ClarityEventField {
+                    name: p.name,
+                    field_type: convert_solidity_type(&p.param_type),
+                    indexed: p.indexed,
+                })
+                .collect(),
+        });
     }
 
-    // Convert constructor if present
     if let Some(constructor) = contract.constructor {
-        clarity_contract.functions.push(convert_constructor(constructor)?);
+        clarity_contract.functions.push(ClarityFunction {
+            name: "init".to_string(),
+            params: constructor.params.into_iter()
+                .map(|p| ClarityParameter {
+                    name: p.name,
+                    param_type: convert_solidity_type(&p.param_type),
+                })
+                .collect(),
+            public: true,
+            read_only: false,
+            body: convert_statements(constructor.body)?,
+        });
     }
 
-    // Convert functions
     for func in contract.functions {
         clarity_contract.functions.push(convert_function(func)?);
     }
@@ -100,58 +167,33 @@ pub fn convert_contract(contract: Contract) -> Result<ClarityContract> {
     Ok(clarity_contract)
 }
 
-fn convert_mapping(var: StateVariable) -> Result<ClarityMap> {
-    Ok(ClarityMap {
-        name: var.name,
-        key_type: var.mapping_key_type.unwrap_or_else(|| "uint".to_string()),
-        value_type: var.mapping_value_type.unwrap_or_else(|| "uint".to_string()),
-    })
-}
-
-fn convert_event(event: Event) -> ClarityEvent {
-    ClarityEvent {
-        name: event.name,
-        fields: event.params.into_iter()
-            .map(|p| ClarityEventField {
-                name: p.name,
-                field_type: convert_type(&p.param_type),
-            })
-            .collect(),
-    }
-}
-
-fn convert_constructor(constructor: Constructor) -> Result<ClarityFunction> {
-    Ok(ClarityFunction {
-        name: "init".to_string(),
-        params: constructor.params.into_iter()
-            .map(|p| ClarityParameter {
-                name: p.name,
-                param_type: convert_type(&p.param_type),
-            })
-            .collect(),
-        return_type: None,
-        public: true,
-        read_only: false,
-        body: convert_statements(constructor.body)?,
-    })
-}
-
-pub fn convert_state_variable(var: StateVariable) -> ClarityDataVar {
-    let var_type = convert_type(&var.var_type);
-    let initial_value = if let Some(val) = var.initial_value {
-        if var_type == "uint" && val.chars().all(|c| c.is_digit(10)) {
-            format!("u{}", val)
-        } else {
-            val
+fn convert_state_variable(var: StateVariable) -> ClarityDataVar {
+    let var_type = convert_solidity_type(&var.var_type);
+    let initial_value = if let Some(expr) = var.initial_value {
+        match expr {
+            Expression::Literal(val) => {
+                if var_type == "uint" && val.chars().all(|c| c.is_digit(10)) {
+                    format!("u{}", val)
+                } else {
+                    val
+                }
+            },
+            _ => match var_type.as_str() {
+                "uint" => "u0".to_string(),
+                "bool" => "false".to_string(),
+                "principal" => "tx-sender".to_string(),
+                "string-ascii" => "\"\"".to_string(),
+                _ => "u0".to_string(),
+            }
         }
     } else {
         match var_type.as_str() {
-            "uint" => "u0",
-            "bool" => "false",
-            "principal" => "tx-sender",
-            "string-ascii" => "\"\"",
-            _ => "u0",
-        }.to_string()
+            "uint" => "u0".to_string(),
+            "bool" => "false".to_string(),
+            "principal" => "tx-sender".to_string(),
+            "string-ascii" => "\"\"".to_string(),
+            _ => "u0".to_string(),
+        }
     };
 
     ClarityDataVar {
@@ -164,25 +206,16 @@ pub fn convert_state_variable(var: StateVariable) -> ClarityDataVar {
 }
 
 pub fn convert_function(func: Function) -> Result<ClarityFunction> {
-    // Public and external functions are accessible from outside the contract
-    let public = func.visibility.as_deref() == Some("public") ||
-                 func.visibility.as_deref() == Some("external");
-
-    // View and pure functions are read-only
-    let read_only = func.mutability.as_deref() == Some("view") ||
-                    func.mutability.as_deref() == Some("pure");
-
     Ok(ClarityFunction {
         name: func.name,
         params: func.params.into_iter()
             .map(|p| ClarityParameter {
                 name: p.name,
-                param_type: convert_type(&p.param_type),
+                param_type: convert_solidity_type(&p.param_type),
             })
             .collect(),
-        return_type: func.return_type.map(|t| convert_type(&t)),
-        public,
-        read_only,
+        public: func.visibility.as_ref().map_or(false, |v| v == "public" || v == "external"),
+        read_only: func.mutability.as_ref().map_or(false, |m| m == "view" || m == "pure"),
         body: convert_statements(func.body)?,
     })
 }
@@ -207,6 +240,13 @@ fn convert_statements(statements: Vec<Statement>) -> Result<Vec<ClarityExpressio
                     ]
                 ));
             }
+            Statement::MapAccessAssignment(map_name, key, value) => {
+                clarity_statements.push(ClarityExpression::MapSet(
+                    map_name,
+                    vec![convert_expression(*key)],
+                    Box::new(convert_expression(value))
+                ));
+            }
             Statement::Emit(event_name, args) => {
                 let mut print_args = vec![ClarityExpression::Literal(format!("\"{}\"", event_name))];
                 print_args.extend(args.into_iter().map(convert_expression));
@@ -218,47 +258,67 @@ fn convert_statements(statements: Vec<Statement>) -> Result<Vec<ClarityExpressio
     Ok(clarity_statements)
 }
 
-pub fn convert_type(solidity_type: &str) -> String {
-    match solidity_type {
-        "uint256" | "uint" => "uint".to_string(),
-        "bool" => "bool".to_string(),
-        "address" => "principal".to_string(),
-        "string" => "string-ascii".to_string(),
-        _ => "uint".to_string(), // Default to uint for unknown types
-    }
-}
-
 fn convert_expression(expr: Expression) -> ClarityExpression {
     match expr {
         Expression::Literal(val) => {
-            // Add 'u' prefix for number literals to match Clarity's uint format
-            if val.chars().all(|c| c.is_digit(10)) {
+            if val == "true" {
+                ClarityExpression::Literal("true".to_string())
+            } else if val == "false" {
+                ClarityExpression::Literal("false".to_string())
+            } else if val.chars().all(|c| c.is_digit(10)) {
                 ClarityExpression::Literal(format!("u{}", val))
             } else {
                 ClarityExpression::Literal(val)
             }
         }
-        Expression::Identifier(name) => ClarityExpression::FunctionCall(
-            "var-get".to_string(),
-            vec![ClarityExpression::Var(name)]
-        ),
-        Expression::BinaryOp(left, op, right) => {
+        Expression::Identifier(name) => {
             ClarityExpression::FunctionCall(
-                op,
-                vec![convert_expression(*left), convert_expression(*right)]
+                "var-get".to_string(),
+                vec![ClarityExpression::Var(name)]
             )
         }
-        Expression::FunctionCall(name, args) => {
-            ClarityExpression::FunctionCall(
-                name,
-                args.into_iter().map(convert_expression).collect()
-            )
+        Expression::BinaryOp(left, op, right) => {
+            match op.as_str() {
+                "," => {
+                    ClarityExpression::FunctionCall(
+                        "tuple".to_string(),
+                        vec![convert_expression(*left), convert_expression(*right)]
+                    )
+                }
+                _ => ClarityExpression::FunctionCall(
+                    op,
+                    vec![convert_expression(*left), convert_expression(*right)]
+                )
+            }
         }
         Expression::MapAccess(map_name, key) => {
             ClarityExpression::MapGet(
                 map_name,
                 vec![convert_expression(*key)]
             )
+        }
+        Expression::MemberAccess(expr, member) => {
+            if let Expression::Identifier(name) = *expr {
+                if name == "msg" && member == "sender" {
+                    ClarityExpression::Var("tx-sender".to_string())
+                } else {
+                    ClarityExpression::Var(format!("{}-{}", name, member))
+                }
+            } else {
+                ClarityExpression::Var(format!("{}-{}", expr, member))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Expression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expression::Identifier(name) => write!(f, "{}", name),
+            Expression::Literal(val) => write!(f, "{}", val),
+            Expression::BinaryOp(left, op, right) => write!(f, "({} {} {})", left, op, right),
+            Expression::MapAccess(map, key) => write!(f, "{}[{}]", map, key),
+            Expression::MemberAccess(expr, member) => write!(f, "{}.{}", expr, member),
         }
     }
 }

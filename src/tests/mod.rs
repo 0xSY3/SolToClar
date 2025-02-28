@@ -2,6 +2,7 @@ use super::parser;
 use super::generator;
 use super::transpiler::{ast::*, converter::*};
 use anyhow::Result;
+use crate::transpiler::converter::convert_solidity_type;
 
 #[cfg(test)]
 mod tests {
@@ -17,7 +18,7 @@ mod tests {
                 }
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
         assert_eq!(contract.name, "Counter");
         assert_eq!(contract.state_variables.len(), 1);
         assert_eq!(contract.functions.len(), 1);
@@ -33,7 +34,7 @@ mod tests {
                 address owner;
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
         assert_eq!(contract.state_variables.len(), 3);
         assert_eq!(contract.state_variables[0].var_type, "uint256");
         assert_eq!(contract.state_variables[1].var_type, "bool");
@@ -51,7 +52,7 @@ mod tests {
                 }
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
         let func = &contract.functions[0];
         assert_eq!(func.name, "getValue");
         assert_eq!(func.return_type, Some("uint256".to_string()));
@@ -68,7 +69,7 @@ mod tests {
                 }
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
         let func = &contract.functions[0];
         assert_eq!(func.name, "add");
 
@@ -77,7 +78,7 @@ mod tests {
             Statement::Assignment(var_name, Expression::BinaryOp(left, op, right)) => {
                 assert_eq!(var_name, "x");
                 assert_eq!(op, "+");
-                match (&**left, &**right) {
+                match (left.as_ref(), right.as_ref()) {
                     (Expression::Identifier(l), Expression::Identifier(r)) => {
                         assert_eq!(l, "x");
                         assert_eq!(r, "y");
@@ -104,6 +105,7 @@ mod tests {
                     mapping_value_type: None,
                     initial_value: None,
                     is_constant: false,
+                    nested_mapping: None,
                 }
             ],
             functions: vec![
@@ -139,22 +141,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_invalid_contract() {
-        let source = r#"
-            contract {
-                invalid syntax
-            }
-        "#;
-        assert!(parser::parse(source).is_err());
-    }
-
-    #[test]
     fn test_parse_empty_contract() -> Result<()> {
         let source = r#"
             contract Empty {
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
         assert_eq!(contract.name, "Empty");
         assert_eq!(contract.state_variables.len(), 0);
         assert_eq!(contract.functions.len(), 0);
@@ -162,12 +154,13 @@ mod tests {
     }
 
     #[test]
-    fn test_type_conversion() {
-        assert_eq!(convert_type("uint256"), "uint");
-        assert_eq!(convert_type("bool"), "bool");
-        assert_eq!(convert_type("address"), "principal");
-        assert_eq!(convert_type("string"), "string-ascii");
-        assert_eq!(convert_type("unknown"), "uint"); // default case
+    fn test_parse_invalid_contract() {
+        let source = r#"
+            contract {
+                invalid syntax
+            }
+        "#;
+        assert!(parser::parse_all(source).is_err());
     }
 
     #[test]
@@ -177,7 +170,7 @@ mod tests {
                 mapping(address => uint256) balances;
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
         let var = &contract.state_variables[0];
         assert!(var.is_mapping);
         assert_eq!(var.mapping_key_type.as_ref().unwrap(), "address");
@@ -192,14 +185,24 @@ mod tests {
                 event Transfer(address indexed from, address indexed to, uint256 amount);
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
         let event = &contract.events[0];
         assert_eq!(event.name, "Transfer");
         assert_eq!(event.params.len(), 3);
+        // Check indexed parameters
         assert!(event.params[0].indexed);
         assert!(event.params[1].indexed);
         assert!(!event.params[2].indexed);
         Ok(())
+    }
+
+    #[test]
+    fn test_type_conversion() {
+        assert_eq!(convert_solidity_type("uint256"), "uint");
+        assert_eq!(convert_solidity_type("bool"), "bool");
+        assert_eq!(convert_solidity_type("address"), "principal");
+        assert_eq!(convert_solidity_type("string"), "string-ascii");
+        assert_eq!(convert_solidity_type("unknown"), "uint"); // default case
     }
 
     #[test]
@@ -223,7 +226,7 @@ mod tests {
                 }
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
 
         assert_eq!(contract.functions.len(), 4);
         assert_eq!(contract.functions[0].visibility, Some("public".to_string()));
@@ -255,7 +258,7 @@ mod tests {
                 uint256 constant LIMIT = 100;
             }
         "#;
-        let contract = parser::parse(source)?;
+        let contract = parser::parse_all(source)?.remove(0);
 
         // Check state variables were parsed correctly
         assert_eq!(contract.state_variables.len(), 4);
@@ -263,7 +266,11 @@ mod tests {
         assert_eq!(contract.state_variables[1].visibility, Some("private".to_string()));
         assert_eq!(contract.state_variables[2].visibility, Some("internal".to_string()));
         assert!(contract.state_variables[3].is_constant);
-        assert_eq!(contract.state_variables[3].initial_value, Some("100".to_string()));
+        // Check the initial value of the constant is a literal "100"
+        match &contract.state_variables[3].initial_value {
+            Some(Expression::Literal(val)) => assert_eq!(val, "100"),
+            _ => panic!("Expected literal value for constant"),
+        }
 
         // Check generated Clarity code
         let clarity_contract = convert_contract(contract)?;
@@ -277,6 +284,64 @@ mod tests {
         assert!(clarity_code.contains("(define-data-var owner principal tx-sender)"));
         // Constants should be defined using define-constant
         assert!(clarity_code.contains("(define-constant LIMIT u100)"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_mappings() -> Result<()> {
+        let source = r#"
+            contract Test {
+                // Simple mapping
+                mapping(address => uint256) public balances;
+
+                // Nested mapping
+                mapping(address => mapping(uint256 => bool)) public approvals;
+
+                // Complex value type
+                mapping(uint256 => address) public tokenOwners;
+            }
+        "#;
+        let contract = parser::parse_all(source)?.remove(0);
+
+        // Check balances mapping
+        let balances = &contract.state_variables[0];
+        assert!(balances.is_mapping);
+        assert_eq!(balances.mapping_key_type.as_ref().unwrap(), "address");
+        assert_eq!(balances.mapping_value_type.as_ref().unwrap(), "uint256");
+        assert_eq!(balances.visibility.as_ref().unwrap(), "public");
+
+        // Check approvals mapping (nested)
+        let approvals = &contract.state_variables[1];
+        assert!(approvals.is_mapping);
+        assert_eq!(approvals.mapping_key_type.as_ref().unwrap(), "address");
+        assert_eq!(approvals.mapping_value_type.as_ref().unwrap(), "mapping(uint256 => bool)");
+        assert_eq!(approvals.visibility.as_ref().unwrap(), "public");
+
+        // Check tokenOwners mapping
+        let token_owners = &contract.state_variables[2];
+        assert!(token_owners.is_mapping);
+        assert_eq!(token_owners.mapping_key_type.as_ref().unwrap(), "uint256");
+        assert_eq!(token_owners.mapping_value_type.as_ref().unwrap(), "address");
+        assert_eq!(token_owners.visibility.as_ref().unwrap(), "public");
+
+        // Check generated Clarity code
+        let clarity_contract = convert_contract(contract)?;
+        let clarity_code = generator::generate(clarity_contract)?;
+
+        // Verify balances map
+        assert!(clarity_code.contains("(define-map balances principal uint)"));
+
+        // Verify approvals map (should be flattened in Clarity)
+        assert!(clarity_code.contains("(define-map approvals {owner: principal, token-id: uint} bool)"));
+
+        // Verify tokenOwners map
+        assert!(clarity_code.contains("(define-map token-owners uint principal)"));
+
+        // Verify public getter functions are generated
+        assert!(clarity_code.contains("(define-read-only (get-balances"));
+        assert!(clarity_code.contains("(define-read-only (get-approvals"));
+        assert!(clarity_code.contains("(define-read-only (get-token-owners"));
 
         Ok(())
     }

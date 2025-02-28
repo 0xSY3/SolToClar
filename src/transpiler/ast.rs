@@ -39,7 +39,15 @@ pub struct StateVariable {
     pub mapping_key_type: Option<String>,
     pub mapping_value_type: Option<String>,
     pub is_constant: bool,
-    pub initial_value: Option<String>,
+    pub initial_value: Option<Expression>,
+    pub nested_mapping: Option<Box<MappingType>>,
+}
+
+#[derive(Debug)]
+pub struct MappingType {
+    pub key_type: String,
+    pub value_type: String,
+    pub nested: Option<Box<MappingType>>,
 }
 
 #[derive(Debug)]
@@ -60,6 +68,7 @@ pub enum Statement {
     Expression(Expression),
     Return(Expression),
     Assignment(String, Expression),
+    MapAccessAssignment(String, Box<Expression>, Expression),
     Emit(String, Vec<Expression>),
 }
 
@@ -68,6 +77,6 @@ pub enum Expression {
     Literal(String),
     Identifier(String),
     BinaryOp(Box<Expression>, String, Box<Expression>),
-    FunctionCall(String, Vec<Expression>),
     MapAccess(String, Box<Expression>),
+    MemberAccess(Box<Expression>, String),
 }

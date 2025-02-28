@@ -26,42 +26,47 @@ fn main() -> Result<()> {
                 .short("o")
                 .long("output")
                 .value_name("FILE")
-                .help("Output Clarity file")
+                .help("Output directory for Clarity files")
                 .takes_value(true),
         )
         .get_matches();
 
     let input_file = matches.value_of("INPUT").unwrap();
-    let output_file = matches
+    let output_dir = matches
         .value_of("output")
         .map(String::from)
-        .unwrap_or_else(|| {
-            Path::new(input_file)
-                .with_extension("clar")
-                .to_string_lossy()
-                .into_owned()
-        });
+        .unwrap_or_else(|| String::from("."));
 
     // Read input file
     let source = fs::read_to_string(input_file)
         .with_context(|| format!("Failed to read input file: {}", input_file))?;
 
-    // Parse Solidity code
-    let ast = parser::parse(&source)
+    // Parse Solidity code - now returns a Vec<Contract>
+    let contracts = parser::parse_all(&source)
         .with_context(|| "Failed to parse Solidity code")?;
 
-    // Convert to Clarity AST
-    let clarity_ast = transpiler::convert(ast)
-        .with_context(|| "Failed to convert to Clarity")?;
+    // Process each contract
+    for contract in contracts {
+        let contract_name = contract.name.clone();
 
-    // Generate Clarity code
-    let clarity_code = generator::generate(clarity_ast)
-        .with_context(|| "Failed to generate Clarity code")?;
+        // Convert to Clarity AST
+        let clarity_ast = transpiler::convert(contract)
+            .with_context(|| format!("Failed to convert {} to Clarity", contract_name))?;
 
-    // Write output file
-    fs::write(&output_file, clarity_code)
-        .with_context(|| format!("Failed to write output file: {}", output_file))?;
+        // Generate Clarity code
+        let clarity_code = generator::generate(clarity_ast)
+            .with_context(|| format!("Failed to generate Clarity code for {}", contract_name))?;
 
-    println!("Successfully converted {} to {}", input_file, output_file);
+        // Create output file path
+        let output_file = Path::new(&output_dir)
+            .join(format!("{}.clar", contract_name.to_lowercase()));
+
+        // Write output file
+        fs::write(&output_file, clarity_code)
+            .with_context(|| format!("Failed to write output file: {}", output_file.display()))?;
+
+        println!("Successfully converted {} to {}", contract_name, output_file.display());
+    }
+
     Ok(())
 }
